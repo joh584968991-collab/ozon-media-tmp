@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="9000mm" height="1960mm" viewBox="0 0 9000 1960">
+<defs>
+<style type="text/css">
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@500;900&family=Space+Grotesk:wght@500;700&display=swap');
+.hero{font-family:'Noto Sans SC','PingFang SC','Microsoft YaHei',sans-serif;font-weight:900;}
+.sub{font-family:'Space Grotesk','Helvetica',sans-serif;font-weight:700;}
+.body{font-family:'Noto Sans SC',sans-serif;font-weight:500;}
+.num{font-family:'Space Grotesk',monospace;font-weight:700;}
+</style>
+<linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+<stop offset="0%" stop-color="#1C1C1F"/>
+<stop offset="100%" stop-color="#09090B"/>
+</linearGradient>
+<linearGradient id="amberGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+<stop offset="0%" stop-color="#DC2626"/>
+<stop offset="50%" stop-color="#F59E0B"/>
+<stop offset="100%" stop-color="#DC2626"/>
+</linearGradient>
+<pattern id="diag" width="80" height="80" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+<line x1="0" y1="0" x2="0" y2="80" stroke="#F59E0B" stroke-width="2" opacity="0.10"/>
+</pattern>
+</defs>
+<rect width="9000" height="1960" fill="url(#bgGrad)"/>
+<rect width="9000" height="1960" fill="url(#diag)"/>
+<rect x="0" y="0" width="9000" height="20" fill="url(#amberGrad)"/>
+<rect x="0" y="1940" width="9000" height="20" fill="url(#amberGrad)"/>
+<g transform="translate(420 880)">
+<rect x="-200" y="-200" width="400" height="400" fill="#F59E0B" rx="40"/>
+<rect x="-100" y="-140" width="56" height="230" fill="#09090B" rx="6"/>
+<rect x="-100" y="60" width="230" height="56" fill="#09090B" rx="6"/>
+<rect x="80" y="-110" width="22" height="220" fill="#DC2626" rx="3"/>
+<rect x="115" y="-70" width="22" height="140" fill="#DC2626" rx="3"/>
+</g>
+<text x="820" y="970" class="hero" font-size="380" fill="#FAFAFA" letter-spacing="10">杭州乐旅汽车音响商行</text>
+<text x="820" y="1190" class="sub" font-size="115" fill="#F59E0B" letter-spacing="8">HANGZHOU LELU AUTO AUDIO</text>
+<text x="420" y="1490" class="hero" font-size="130" fill="#A1A1AA" letter-spacing="4">汽车电子一站式服务商 · 一店购齐 · 厂家直供</text>
+<text x="420" y="1730" class="body" font-size="78" fill="#D4D4D8" letter-spacing="3">汽车大屏导航 · 360全景 · 行车记录仪 · 音响喇叭 · 倒车影像 · 倒车雷达 · 胎压监测 · 货车监控 · LED大灯 · 电动尾门 · 隔音材料 · GPS定位 · 氛围灯</text>
+<line x1="6300" y1="500" x2="6300" y2="1700" stroke="#F59E0B" stroke-width="4" opacity="0.45"/>
+<text x="6600" y="800" class="hero" font-size="90" fill="#F59E0B" letter-spacing="6">服务热线  SERVICE HOTLINE</text>
+<text x="6600" y="1180" class="num" font-size="280" fill="#FAFAFA" letter-spacing="8">188-5826-9585</text>
+<text x="6600" y="1500" class="hero" font-size="90" fill="#F59E0B" letter-spacing="6">门店地址  STORE ADDRESS</text>
+<text x="6600" y="1700" class="hero" font-size="110" fill="#FAFAFA" letter-spacing="4">杭州万品汽配城A区27幢2号</text>
+</svg>
