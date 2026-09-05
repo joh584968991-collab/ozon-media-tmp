@@ -7,6 +7,29 @@ description: "Ozon carousel video batch generation with mandatory pre-push compl
 
 Generate carousel videos in batch with machine-verifiable gates. A model must never infer completion from a plausible filename, URL, or partial command output.
 
+## Pluggable image sources (since seal98 batch)
+
+`ozon_video_pipeline.py` 后端把图片来源抽象成可插拔后端，按 `image_sources.json` 的 priority 顺序路由：
+
+- **xlsx**（默认 catch-all，priority=100）：源 xlsx + 组合采购价表，保留 `DIRECT` / `DERIVED_SINGLE_COMPONENT` 语义
+- **remote_repo**（示例 priority=10）：远端 GitHub 公开仓库 `images/{sku}/{nn:02d}.png`，逐张 ffprobe 校验
+- **local_dir**（可选）：本地目录读图
+
+新增 SKU 来源只需在 `image_sources.json` 加一项，**不需要改脚本**。每个 SKU 的 `RESULT_JSON.image_source.backend` 与 `backend_config` 会标注本次命中的后端，便于审计。
+
+缺省时（无 `image_sources.json`）仅启用 xlsx，行为与旧版本完全一致。
+
+**添加新 SKU 段的步骤**：
+1. 决定 kind（xlsx / remote_repo / local_dir）
+2. 计算 `sku_pattern`（建议用 `^QK(NNNN|NNNN)$` 或精确 regex）
+3. 在 `image_sources.json` 加一条，priority 设小则优先匹配
+4. 跑 `--no-push` 单 SKU 烟测，确认 `backend` 字段正确
+
+**禁止**：
+- 临时塞 URL 进 `resolve_image_source` 调用——必须走配置
+- 让多个后端同时匹配同一 SKU（用 priority 决胜）
+- 在未运行 `--no-push` 烟测前批量推送
+
 ## Trigger
 Any batch task producing `carousel_<SKU>.mp4` files for the `ozon-media-tmp` repo. Standing rule from ozon-lister: every video must pass `check_video_compliance.py` before push.
 

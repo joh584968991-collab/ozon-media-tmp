@@ -17,7 +17,7 @@ import re
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import quote, urlparse
 
@@ -25,6 +25,7 @@ XLSX = Path('/Users/capper/.openclaw/workspace-ozon-lister/workbench/ozon8_final
 COMBO_COMPONENTS_TABLE = Path('/Users/capper/.openclaw/workspace-ozon-lister/workbench/cost/组合采购价表.txt')
 OUT_BASE = Path('/Users/capper/.openclaw/workspace-ozon-media')
 REPO = OUT_BASE
+IMAGE_SOURCES_CONFIG_PATH = OUT_BASE / 'image_sources.json'
 
 # 路径安全和文件命名只允许真实货号常用的 ASCII 字符；支持如 QK1923-L 的后缀。
 SKU_PATTERN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$')
@@ -179,43 +180,276 @@ def load_combo_components() -> dict[str, list[tuple[str, int]]]:
     return {combo_sku: entries for combo_sku, entries in components.items() if entries}
 
 
-def resolve_image_source(target_sku: str) -> ImageSource:
-    """优先用目标 SKU 自有图片；缺失时仅允许权威表中的唯一单品组成回退。"""
-    try:
-        direct_urls = get_images_from_xlsx(target_sku)
-    except SourceSkuNotFoundError:
-        pass
-    else:
+@dataclass(frozen=True)
+class ImageSourceConfig:
+    """可插拔的图片来源后端声明。
+
+    - ``sku_pattern`` 为 None 表示 catch-all 默认后端（如 xlsx）。
+    - ``priority`` 升序遍历，越小越优先；多个后端可声明不同 SKU 段。
+    """
+    name: str
+    kind: str
+    priority: int = 100
+    sku_pattern: str | None = None
+    options: dict = field(default_factory=dict)
+
+    def matches(self, sku: str) -> bool:
+        if self.sku_pattern is None:
+            return True
+        return bool(re.fullmatch(self.sku_pattern, sku))
+
+
+class ImageSourceBackend:
+    """图片来源后端协议：把任意存储（xlsx / 远端仓库 / 本地目录）映射为可下载 URL 列表。"""
+    name: str = ''
+
+    def resolve(self, target_sku: str) -> ImageSource:
+        raise NotImplementedError
+
+    def describe(self) -> dict[str, object]:
+        return {'name': self.name}
+
+
+class XlsxImageBackend(ImageSourceBackend):
+    """从源 xlsx + 组合采购价表读取图片，保留原 DIRECT / DERIVED_SINGLE_COMPONENT 语义。"""
+    name = 'xlsx'
+
+    def __init__(self, options: dict | None = None):
+        self.options = options or {}
+
+    def resolve(self, target_sku: str) -> ImageSource:
+        try:
+            direct_urls = get_images_from_xlsx(target_sku)
+        except SourceSkuNotFoundError:
+            pass
+        else:
+            return ImageSource(
+                target_sku=target_sku,
+                source_sku=target_sku,
+                image_urls=direct_urls,
+                mode='DIRECT',
+            )
+
+        components = load_combo_components().get(target_sku)
+        if not components:
+            raise SourceSkuNotFoundError(
+                f'xlsx 中未找到 SKU {target_sku}，组合采购价表也没有该 SKU'
+            )
+        if len(components) != 1:
+            raise PipelineError(
+                f'组合 SKU {target_sku} 含 {len(components)} 个单品组成，禁止用任一单品图片代替组合图片'
+            )
+
+        source_sku, component_quantity = components[0]
+        try:
+            source_urls = get_images_from_xlsx(source_sku)
+        except SourceSkuNotFoundError as exc:
+            raise PipelineError(
+                f'组合 SKU {target_sku} 可回退到单品 {source_sku}，但该单品在 xlsx 中不存在'
+            ) from exc
+        return ImageSource(
+            target_sku=target_sku,
+            source_sku=source_sku,
+            image_urls=source_urls,
+            mode='DERIVED_SINGLE_COMPONENT',
+            component_quantity=component_quantity,
+            mapping_file=str(COMBO_COMPONENTS_TABLE),
+        )
+
+    def describe(self) -> dict[str, object]:
+        return {'name': self.name, 'xlsx': str(XLSX), 'combo': str(COMBO_COMPONENTS_TABLE)}
+
+
+class RemoteRepoImageBackend(ImageSourceBackend):
+    """从远端 GitHub 公开仓库 raw 链接读取图片。
+
+    通过 ``download_image`` 逐张 ffprobe 校验，确认真实可解码 PNG 才纳入 URL 列表；
+    假定文件名按 ``{nn:02d}.png`` 从 min_index 连续递增，缺一张即停止以避免混入违规素材。
+    """
+    name = 'remote_repo'
+
+    def __init__(self, owner: str, repo: str, sha: str,
+                 path_template: str = 'images/{sku}/{nn:02d}.png',
+                 min_index: int = 1, max_index: int = 9,
+                 config_path: str = ''):
+        self.base = f'https://raw.githubusercontent.com/{owner}/{repo}/{sha}'
+        self.path_template = path_template
+        self.min_index = min_index
+        self.max_index = max_index
+        self.config_path = config_path
+
+    def _url(self, sku: str, nn: int) -> str:
+        return f"{self.base}/{self.path_template.format(sku=sku, nn=nn)}"
+
+    def resolve(self, target_sku: str) -> ImageSource:
+        urls: list[str] = []
+        with tempfile.TemporaryDirectory(prefix=f'.probe_{target_sku}_', dir=OUT_BASE) as tmp_name:
+            tmp_dir = Path(tmp_name)
+            for nn in range(self.min_index, self.max_index + 1):
+                url = self._url(target_sku, nn)
+                probe_file = tmp_dir / f'{nn:02d}.png'
+                if download_image(url, probe_file):
+                    urls.append(url)
+                else:
+                    break  # 连续 01..N；缺一张即停止
+
+        if len(urls) < MIN_IMAGES:
+            raise SourceSkuNotFoundError(
+                f'远端仓库 {self.base} 找不到 SKU {target_sku} 的 ≥{MIN_IMAGES} 张图（实际 {len(urls)} 张）'
+            )
+
         return ImageSource(
             target_sku=target_sku,
             source_sku=target_sku,
-            image_urls=direct_urls,
-            mode='DIRECT',
+            image_urls=urls,
+            mode='REMOTE_REPO',
+            mapping_file=self.config_path,
         )
 
-    components = load_combo_components().get(target_sku)
-    if not components:
-        raise PipelineError(f'源图片表中未找到 SKU {target_sku}，且组合 SKU 映射表没有该 SKU')
-    if len(components) != 1:
-        raise PipelineError(
-            f'组合 SKU {target_sku} 含 {len(components)} 个单品组成，禁止用任一单品图片代替组合图片'
+    def describe(self) -> dict[str, object]:
+        return {
+            'name': self.name,
+            'base': self.base,
+            'path_template': self.path_template,
+            'min_index': self.min_index,
+            'max_index': self.max_index,
+        }
+
+
+class LocalDirImageBackend(ImageSourceBackend):
+    """从本地目录读取图片，按文件名递增序列拼接。"""
+    name = 'local_dir'
+
+    def __init__(self, base_dir: str,
+                 sku_subdir: str = '{sku}',
+                 filename_pattern: str = '{nn:02d}.png',
+                 min_index: int = 1, max_index: int = 9,
+                 config_path: str = ''):
+        self.base_dir = Path(base_dir)
+        self.sku_subdir = sku_subdir
+        self.filename_pattern = filename_pattern
+        self.min_index = min_index
+        self.max_index = max_index
+        self.config_path = config_path
+
+    def resolve(self, target_sku: str) -> ImageSource:
+        sub = self.base_dir / self.sku_subdir.format(sku=target_sku)
+        if not sub.is_dir():
+            raise SourceSkuNotFoundError(f'本地目录 {sub} 不存在')
+
+        urls: list[str] = []
+        for nn in range(self.min_index, self.max_index + 1):
+            file_path = sub / self.filename_pattern.format(sku=target_sku, nn=f'{nn:02d}')
+            if file_path.is_file() and image_is_decodable(file_path):
+                urls.append(file_path.absolute().as_uri())
+            else:
+                break
+
+        if len(urls) < MIN_IMAGES:
+            raise SourceSkuNotFoundError(
+                f'本地目录 {sub} 找不到 SKU {target_sku} 的 ≥{MIN_IMAGES} 张图（实际 {len(urls)} 张）'
+            )
+
+        return ImageSource(
+            target_sku=target_sku,
+            source_sku=target_sku,
+            image_urls=urls,
+            mode='LOCAL_DIR',
+            mapping_file=self.config_path,
         )
 
-    source_sku, component_quantity = components[0]
+    def describe(self) -> dict[str, object]:
+        return {'name': self.name, 'base_dir': str(self.base_dir)}
+
+
+def make_backend(cfg: ImageSourceConfig) -> ImageSourceBackend:
+    """根据配置构造后端实例；未知 kind 抛 PipelineError。"""
+    if cfg.kind == 'xlsx':
+        return XlsxImageBackend(cfg.options)
+    if cfg.kind == 'remote_repo':
+        opts = cfg.options
+        for required_key in ('owner', 'repo', 'sha'):
+            if required_key not in opts:
+                raise PipelineError(f'remote_repo 配置缺少字段 {required_key!r}')
+        return RemoteRepoImageBackend(
+            owner=opts['owner'],
+            repo=opts['repo'],
+            sha=opts['sha'],
+            path_template=opts.get('path_template', 'images/{sku}/{nn:02d}.png'),
+            min_index=int(opts.get('min_index', 1)),
+            max_index=int(opts.get('max_index', 9)),
+            config_path=str(IMAGE_SOURCES_CONFIG_PATH),
+        )
+    if cfg.kind == 'local_dir':
+        opts = cfg.options
+        if 'base_dir' not in opts:
+            raise PipelineError('local_dir 配置缺少字段 base_dir')
+        return LocalDirImageBackend(
+            base_dir=opts['base_dir'],
+            sku_subdir=opts.get('sku_subdir', '{sku}'),
+            filename_pattern=opts.get('filename_pattern', '{nn:02d}.png'),
+            min_index=int(opts.get('min_index', 1)),
+            max_index=int(opts.get('max_index', 9)),
+            config_path=str(IMAGE_SOURCES_CONFIG_PATH),
+        )
+    raise PipelineError(f'未知图片来源后端类型: {cfg.kind!r}')
+
+
+def load_image_source_config(path: Path | None = None) -> list[ImageSourceConfig]:
+    """读 image_sources.json；缺省时只启用 xlsx 后端（保持旧行为完全兼容）。"""
+    cfg_path = path or IMAGE_SOURCES_CONFIG_PATH
+    if not cfg_path.is_file():
+        return [ImageSourceConfig(name='xlsx_primary', kind='xlsx', priority=100, sku_pattern=None, options={})]
     try:
-        source_urls = get_images_from_xlsx(source_sku)
-    except SourceSkuNotFoundError as exc:
-        raise PipelineError(
-            f'组合 SKU {target_sku} 可回退到单品 {source_sku}，但该单品在源图片表中不存在'
-        ) from exc
-    return ImageSource(
-        target_sku=target_sku,
-        source_sku=source_sku,
-        image_urls=source_urls,
-        mode='DERIVED_SINGLE_COMPONENT',
-        component_quantity=component_quantity,
-        mapping_file=str(COMBO_COMPONENTS_TABLE),
-    )
+        data = json.loads(cfg_path.read_text(encoding='utf-8'))
+    except json.JSONDecodeError as exc:
+        raise PipelineError(f'image_sources.json 解析失败：{exc}') from exc
+    sources_raw = data.get('sources')
+    if not isinstance(sources_raw, list) or not sources_raw:
+        raise PipelineError('image_sources.json 必须包含非空 sources 数组')
+    configs: list[ImageSourceConfig] = []
+    for entry in sources_raw:
+        if not isinstance(entry, dict):
+            raise PipelineError('image_sources.json 的 sources 每项必须为对象')
+        if 'kind' not in entry:
+            raise PipelineError('image_sources.json 的 sources 每项必须包含 kind')
+        cfg = ImageSourceConfig(
+            name=str(entry.get('name') or entry['kind']),
+            kind=str(entry['kind']),
+            priority=int(entry.get('priority', 100)),
+            sku_pattern=entry.get('sku_pattern'),
+            options=entry.get('options') or {},
+        )
+        configs.append(cfg)
+    return configs
+
+
+def resolve_image_source(target_sku: str,
+                         config: list[ImageSourceConfig] | None = None,
+                         ) -> tuple[ImageSource, str]:
+    """按 priority 升序遍历已声明的图片来源后端。
+
+    对 SourceSkuNotFoundError 宽容（继续试下一个后端），其他 PipelineError 立即抛。
+    返回 ``(ImageSource, 后端名)`` 以便 RESULT_JSON 标注 backend 与 backend_config。
+    """
+    configs = config if config is not None else load_image_source_config()
+    sorted_configs = sorted(configs, key=lambda c: c.priority)
+    last_err: str | None = None
+    matched_any = False
+    for cfg in sorted_configs:
+        if not cfg.matches(target_sku):
+            continue
+        matched_any = True
+        backend = make_backend(cfg)
+        try:
+            image_source = backend.resolve(target_sku)
+            return image_source, backend.name
+        except SourceSkuNotFoundError as exc:
+            last_err = f'{backend.name}: {exc}'
+            continue
+    if not matched_any:
+        raise PipelineError(f'没有任何图片来源后端匹配 SKU {target_sku}')
+    raise PipelineError(f'所有匹配的后端均找不到 SKU {target_sku}：{last_err or "unknown"}')
 
 
 def image_is_decodable(path: Path) -> bool:
@@ -412,13 +646,15 @@ def main() -> int:
         if not args.no_push and out_dir != OUT_BASE.resolve():
             raise PipelineError('推送模式只能使用仓库根目录；自定义输出目录必须搭配 --no-push')
 
-        image_source = resolve_image_source(sku)
+        image_source, image_backend = resolve_image_source(sku)
+        image_evidence = dict(image_source.evidence())
+        image_evidence['backend'] = image_backend
         stage = 'generation'
         video_path, metadata = make_video(sku, image_source.image_urls, out_dir, args.replace_existing)
         if args.no_push:
             emit_result(
                 'GENERATED_COMPLIANT', sku=sku, video_path=str(video_path),
-                image_source=image_source.evidence(), compliance=metadata,
+                image_source=image_evidence, compliance=metadata,
             )
             return 0
 
@@ -430,13 +666,13 @@ def main() -> int:
         if status_code == 200 and content_type_base == 'video/mp4':
             emit_result(
                 'CDN_READY', sku=sku, commit=commit, available_url=candidate_url,
-                http_status=status_code, content_type=content_type, image_source=image_source.evidence(),
+                http_status=status_code, content_type=content_type, image_source=image_evidence,
             )
             return 0
 
         emit_result(
             'PUSHED_CDN_PENDING', sku=sku, commit=commit, candidate_url=candidate_url,
-            http_status=status_code, content_type=content_type, image_source=image_source.evidence(),
+            http_status=status_code, content_type=content_type, image_source=image_evidence,
         )
         return 2
     except PipelineError as exc:

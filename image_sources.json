@@ -1,0 +1,25 @@
+{
+  "sources": [
+    {
+      "name": "seal98_remote",
+      "kind": "remote_repo",
+      "priority": 10,
+      "sku_pattern": "^QK32(0[5-9]|[1-9][0-9])$|^QK330[0-2]$",
+      "options": {
+        "owner": "joh584968991-collab",
+        "repo": "AutoPartsPro-seal98-images",
+        "sha": "01c48cd1e960cb1892f8d749b6e2fb76a3ad2e8b",
+        "path_template": "images/{sku}/{nn:02d}.png",
+        "min_index": 1,
+        "max_index": 9
+      }
+    },
+    {
+      "name": "xlsx_primary",
+      "kind": "xlsx",
+      "priority": 100,
+      "sku_pattern": null,
+      "options": {}
+    }
+  ]
+}
